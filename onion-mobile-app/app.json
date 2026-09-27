@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "Onion Grader (प्याज ग्रेडर)",
+    "slug": "onion-grader",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Allow Onion Grader to access camera to scan onion heaps.",
+        "NSMicrophoneUsageDescription": "Allow Onion Grader to access microphone for video recording."
+      }
+    },
+    "android": {
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "adaptiveIcon": {
+        "backgroundColor": "#FBF9F6",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-sharing",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Onion Grader to access your camera to scan onion heaps.",
+          "microphonePermission": "Allow Onion Grader to access your microphone for video scans."
+        }
+      ]
+    ]
+  }
+}
