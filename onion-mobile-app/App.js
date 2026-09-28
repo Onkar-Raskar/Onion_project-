@@ -6,8 +6,8 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
-  SafeAreaView,
   StatusBar,
+  Platform,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Accelerometer } from 'expo-sensors';
@@ -41,7 +41,7 @@ const QUEUE_STORAGE_KEY = '@onion_grader_offline_queue';
 const SETTINGS_KEY = '@onion_grader_settings';
 
 // Default to the computer's actual Wi-Fi IP address on the local network
-const DEFAULT_API_URL = 'http://192.168.1.101:8000/analyze';
+const DEFAULT_API_URL = 'http://192.168.1.100:8000/analyze';
 
 export default function App() {
   // --- Navigation Tab State ---
@@ -65,9 +65,9 @@ export default function App() {
   // --- Camera & Capture State ---
   const [facing, setFacing] = useState('back');
   const [mode, setMode] = useState('picture'); // default 'picture' prevents Android black screen
+  const [isTorchOn, setIsTorchOn] = useState(false);
   const [captureState, setCaptureState] = useState('idle'); // 'idle' | 'recording' | 'analyzing' | 'syncing'
   const [timeLeft, setTimeLeft] = useState(5);
-  const [isCameraReady, setIsCameraReady] = useState(false);
   const cameraRef = useRef(null);
 
   // --- Calibration State ---
@@ -111,11 +111,18 @@ export default function App() {
     loadOfflineQueue();
     checkBackendHealth(apiUrl);
 
-    Accelerometer.setUpdateInterval(200);
+    Accelerometer.setUpdateInterval(250);
+    let sampleHistory = [1.0, 1.0, 1.0];
     const subscription = Accelerometer.addListener((data) => {
       const { x, y, z } = data;
       const totalForce = Math.sqrt(x * x + y * y + z * z);
-      const steady = Math.abs(totalForce - 1.0) <= 0.08;
+      sampleHistory.push(totalForce);
+      if (sampleHistory.length > 4) sampleHistory.shift();
+
+      // Check jitter across recent samples. Natural human hand tremor has ~0.15-0.25G variance.
+      // Tolerance of 0.35 allows easy holding without false shaking alerts.
+      const jitter = Math.max(...sampleHistory) - Math.min(...sampleHistory);
+      const steady = jitter < 0.35 && Math.abs(totalForce - 1.0) <= 0.35;
       isDeviceSteadyRef.current = steady;
       setIsDeviceSteady(steady);
     });
@@ -245,6 +252,7 @@ export default function App() {
             fieldName: 'file',
             httpMethod: 'POST',
             uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+            mimeType: item.fileType === 'video' ? 'video/mp4' : 'image/jpeg',
             parameters: { ppm: item.ppm.toString() },
           }),
           new Promise((_, reject) => setTimeout(() => reject(new Error('Sync Timeout')), 60000)),
@@ -300,34 +308,22 @@ export default function App() {
 
   // --- Camera Capture Flow ---
   const handleCapture = async () => {
-    if (!cameraRef.current || captureState !== 'idle' || !isDeviceSteadyRef.current) return;
+    if (!cameraRef.current || captureState !== 'idle') return;
 
     try {
       if (mode === 'video') {
         setCaptureState('recording');
         let time = 5;
         setTimeLeft(time);
-        let aborted = false;
 
         const timer = setInterval(() => {
-          if (!isDeviceSteadyRef.current) {
-            clearInterval(timer);
-            aborted = true;
-            cameraRef.current?.stopRecording();
-            setCaptureState('idle');
-            Alert.alert(
-              getTranslation(lang, 'holdSteady'),
-              getTranslation(lang, 'deviceShaking')
-            );
-            return;
-          }
           time -= 1;
           setTimeLeft(time);
           if (time <= 0) clearInterval(timer);
         }, 1000);
 
         const video = await cameraRef.current.recordAsync({ maxDuration: 5, mute: true });
-        if (aborted) return;
+        clearInterval(timer);
 
         setCaptureState('analyzing');
         await sendToAPI(video.uri, 'video', ppm);
@@ -372,17 +368,36 @@ export default function App() {
         await new Promise((r) => setTimeout(r, 1200));
         data = generateMockReport(currentPpm, premiumThreshold);
       } else {
+        // Ensure proper filename extension for FastAPI file parser (.jpg / .mp4)
+        let targetUri = fileUri;
+        const ext = fileType === 'video' ? '.mp4' : '.jpg';
+        if (
+          !fileUri.toLowerCase().endsWith('.jpg') &&
+          !fileUri.toLowerCase().endsWith('.jpeg') &&
+          !fileUri.toLowerCase().endsWith('.png') &&
+          !fileUri.toLowerCase().endsWith('.mp4')
+        ) {
+          const safePath = `${FileSystem.cacheDirectory}scan_${Date.now()}${ext}`;
+          await FileSystem.copyAsync({ from: fileUri, to: safePath });
+          targetUri = safePath;
+        }
+
         const response = await Promise.race([
-          FileSystem.uploadAsync(apiUrl, fileUri, {
+          FileSystem.uploadAsync(apiUrl, targetUri, {
             fieldName: 'file',
             httpMethod: 'POST',
             uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+            mimeType: fileType === 'video' ? 'video/mp4' : 'image/jpeg',
             parameters: { ppm: currentPpm.toString() },
           }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Processing Timeout')), 60000)),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Processing timed out after 60s. Server is busy or unreachable.')), 60000)
+          ),
         ]);
 
-        if (response.status !== 200) throw new Error(`Server returned status: ${response.status}`);
+        if (response.status !== 200) {
+          throw new Error(`Server returned HTTP ${response.status}: ${response.body || 'No details'}`);
+        }
         data = JSON.parse(response.body);
       }
 
@@ -396,15 +411,31 @@ export default function App() {
         return;
       }
 
+      // Check if AI detected at least 1 onion
+      const detectedCount = Number(data?.batch_metrics?.total_unique_onions ?? data?.total ?? 0);
+      if (detectedCount === 0) {
+        Alert.alert(
+          lang === 'hi' ? 'कोई प्याज नहीं मिला' : 'No Onions Identified',
+          lang === 'hi'
+            ? 'कैमरे को प्याज के ढेर पर थोड़ा पास रखें और अच्छी रोशनी में दोबारा स्कैन करें।'
+            : 'The AI could not clearly identify onions in this shot. Please move closer to the heap and ensure adequate lighting.'
+        );
+        setCaptureState('idle');
+        return;
+      }
+
       // Buffer updates
       const updatedMediaCache = [...mediaCache, { uri: fileUri, type: fileType }];
       const updatedReportBuffer = [...reportBuffer, data];
       setMediaCache(updatedMediaCache);
       setReportBuffer(updatedReportBuffer);
 
-      // Check if more samples are needed in sequence (3-layer sampling)
+      // For VIDEO mode: skip 3-layer sampling, go directly to report
+      // For PHOTO mode: continue 3-layer sampling sequence (top/middle/bottom)
       const samplingSteps = getTranslation(lang, 'samplingSteps');
-      if (sampleIndex < samplingSteps.length - 1) {
+      const needsMoreSamples = fileType !== 'video' && sampleIndex < samplingSteps.length - 1;
+
+      if (needsMoreSamples) {
         setSampleIndex(sampleIndex + 1);
         Alert.alert(
           getTranslation(lang, 'sampleLoggedTitle'),
@@ -414,7 +445,7 @@ export default function App() {
         return;
       }
 
-      // All 3 samples collected -> mathematically aggregate
+      // All samples collected -> mathematically aggregate
       const finalAggregatedReport = aggregateReports(updatedReportBuffer);
 
       if (isReassessing) {
@@ -434,6 +465,14 @@ export default function App() {
       console.warn('Upload or processing failed:', error.message);
       if (!isDemoMode) {
         await saveToOfflineQueue(fileUri, fileType, currentPpm);
+        Alert.alert(
+          'Mandi Backend Connection Issue',
+          `Could not reach: ${apiUrl}\n\n${error.message}\n\nPlease verify:\n1. Backend is running (python app.py)\n2. Phone is on the same Wi-Fi\n3. Server IP in Settings matches your PC\n\nScan saved to Offline Queue.`,
+          [
+            { text: 'Check Settings', onPress: () => setShowSettingsModal(true) },
+            { text: 'OK' }
+          ]
+        );
       }
     } finally {
       setCaptureState('idle');
@@ -453,17 +492,26 @@ export default function App() {
       } else {
         const simulatedReports = [];
         for (const media of mediaCache) {
+          let targetUri = media.uri;
+          const ext = media.type === 'video' ? '.mp4' : '.jpg';
+          if (!media.uri.toLowerCase().endsWith('.jpg') && !media.uri.toLowerCase().endsWith('.mp4')) {
+            const safePath = `${FileSystem.cacheDirectory}sim_${Date.now()}${ext}`;
+            await FileSystem.copyAsync({ from: media.uri, to: safePath });
+            targetUri = safePath;
+          }
+
           const response = await Promise.race([
-            FileSystem.uploadAsync(simulationUrl, media.uri, {
+            FileSystem.uploadAsync(simulationUrl, targetUri, {
               fieldName: 'file',
               httpMethod: 'POST',
               uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+              mimeType: media.type === 'video' ? 'video/mp4' : 'image/jpeg',
               parameters: {
                 ppm: ppm.toString(),
                 min_premium_mm: premiumThreshold.toString(),
               },
             }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Processing Timeout')), 60000)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Simulation Timeout')), 60000)),
           ]);
 
           if (response.status !== 200) throw new Error(`Server status: ${response.status}`);
@@ -518,6 +566,7 @@ export default function App() {
               fieldName: 'file',
               httpMethod: 'POST',
               uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+              mimeType: media.type === 'video' ? 'video/mp4' : 'image/jpeg',
               parameters: { ppm: ppm.toString() },
             });
             reassessReports.push(JSON.parse(response.body));
@@ -568,8 +617,8 @@ export default function App() {
   };
 
   return (
-    <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.background }]}>
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
+    <View style={[styles.safeArea, { backgroundColor: theme.background, paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 44 }]}>
+      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} translucent backgroundColor="transparent" />
 
       {/* Persistent Top Header */}
       <Header
@@ -607,7 +656,7 @@ export default function App() {
         />
       )}
 
-      {/* TAB 2: CAMERA 3-LAYER SCANNER SCREEN */}
+      {/* TAB 2: CAMERA SCANNER SCREEN */}
       {currentTab === 'scan' && (
         !camPermission?.granted ? (
           <View style={[styles.permissionContainer, { backgroundColor: theme.background }]}>
@@ -645,55 +694,123 @@ export default function App() {
             </View>
           </View>
         ) : (
-          <View style={{ flex: 1, backgroundColor: '#000000' }}>
-            {/* 3-Step Sequence Progress Tracker */}
-            <StepProgressBar
-              theme={theme}
-              lang={lang}
-              currentIndex={sampleIndex}
-              isReassessing={isReassessing}
+          /* Camera view — flat hierarchy matching the original working app pattern:
+             Root container (flex:1, bg:#000) > CameraView (flex:1) + absolute overlays */
+          <View style={styles.scanRoot}>
+            {/* Camera fills entire scan area — MUST be direct child, no extra wrappers */}
+            <CameraView
+              style={styles.camera}
+              ref={cameraRef}
+              facing={facing}
+              mode={mode}
+              mute={true}
+              enableTorch={isTorchOn}
+              videoQuality="1080p"
             />
 
-            {/* Live Camera Preview Container */}
-            <View style={styles.cameraContainer}>
-              <CameraView
-                key={`${facing}-${mode}`}
-                style={styles.camera}
-                ref={cameraRef}
-                facing={facing}
-                mode={mode}
-                mute={true}
-                onCameraReady={() => setIsCameraReady(true)}
-                onMountError={(e) => {
-                  console.warn('Camera Mount Error:', e);
-                  Alert.alert('Camera Error', e.message || 'Could not start camera preview.');
-                }}
-              />
+            {/* All UI is overlaid on top of the camera using absolute positioning */}
+            <View style={styles.uiOverlay} pointerEvents="box-none">
 
-              {/* Overlay Reticle & Visual Guides */}
-              <View style={styles.reticleOverlay} pointerEvents="none">
-                <View style={styles.reticleBox}>
-                  <View style={[styles.corner, styles.tl, { borderColor: theme.primary }]} />
-                  <View style={[styles.corner, styles.tr, { borderColor: theme.primary }]} />
-                  <View style={[styles.corner, styles.bl, { borderColor: theme.primary }]} />
-                  <View style={[styles.corner, styles.br, { borderColor: theme.primary }]} />
+              {/* Top Section: Step Progress (photo mode only) + Stability */}
+              <View style={styles.overlayTop} pointerEvents="box-none">
+                {mode === 'picture' && (
+                  <StepProgressBar
+                    theme={theme}
+                    lang={lang}
+                    currentIndex={sampleIndex}
+                    isReassessing={isReassessing}
+                  />
+                )}
+
+                {/* Stability Indicator */}
+                <View style={{ alignItems: 'center', marginTop: 6 }}>
+                  <StabilityIndicator
+                    theme={theme}
+                    lang={lang}
+                    isSteady={isDeviceSteady}
+                    isRecording={captureState === 'recording'}
+                    timeLeft={timeLeft}
+                    isAnalyzing={captureState === 'analyzing'}
+                  />
                 </View>
               </View>
 
-              {/* Accelerometer Stability Pill */}
-              <View style={styles.stabilityFloat}>
-                <StabilityIndicator
-                  theme={theme}
-                  lang={lang}
-                  isSteady={isDeviceSteady}
-                  isRecording={captureState === 'recording'}
-                  timeLeft={timeLeft}
-                  isAnalyzing={captureState === 'analyzing'}
-                />
+              {/* Center: Reticle (photo mode) or Panoramic Sweep Guide (video mode) */}
+              <View style={styles.overlayCenter} pointerEvents="box-none">
+                {mode === 'picture' ? (
+                  <View style={styles.reticleBox} pointerEvents="none">
+                    <View style={[styles.corner, styles.tl, { borderColor: theme.primary }]} />
+                    <View style={[styles.corner, styles.tr, { borderColor: theme.primary }]} />
+                    <View style={[styles.corner, styles.bl, { borderColor: theme.primary }]} />
+                    <View style={[styles.corner, styles.br, { borderColor: theme.primary }]} />
+                  </View>
+                ) : (
+                  <View style={styles.videoScanContainer} pointerEvents="box-none">
+                    {/* Panoramic Video Sweep Reticle */}
+                    <View
+                      style={[
+                        styles.videoSweepBox,
+                        captureState === 'recording' && styles.videoSweepBoxRecording,
+                      ]}
+                      pointerEvents="none"
+                    >
+                      <View style={[styles.corner, styles.tl, { borderColor: captureState === 'recording' ? theme.gradeUrs : '#38BDF8' }]} />
+                      <View style={[styles.corner, styles.tr, { borderColor: captureState === 'recording' ? theme.gradeUrs : '#38BDF8' }]} />
+                      <View style={[styles.corner, styles.bl, { borderColor: captureState === 'recording' ? theme.gradeUrs : '#38BDF8' }]} />
+                      <View style={[styles.corner, styles.br, { borderColor: captureState === 'recording' ? theme.gradeUrs : '#38BDF8' }]} />
+
+                      {/* Center Sweep Guide */}
+                      <View style={styles.sweepGuide}>
+                        {captureState === 'recording' ? (
+                          <View style={styles.recBadge}>
+                            <View style={styles.recDot} />
+                            <Text style={styles.recText}>REC 00:0{timeLeft}s</Text>
+                          </View>
+                        ) : (
+                          <View style={styles.sweepPromptBox}>
+                            <Text style={styles.sweepPromptArrow}>↔️</Text>
+                            <Text style={styles.sweepPromptText}>
+                              {lang === 'hi'
+                                ? 'धीरे-धीरे ढेर पर कैमरा घुमाएं'
+                                : 'Pan slowly across onion heap'}
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                    </View>
+
+                    {/* Lighting & Torch Helper Button */}
+                    <TouchableOpacity
+                      style={[
+                        styles.torchHelperBanner,
+                        isTorchOn ? styles.torchHelperBannerActive : styles.torchHelperBannerInactive,
+                      ]}
+                      onPress={() => setIsTorchOn(!isTorchOn)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.torchHelperText}>
+                        {isTorchOn
+                          ? (lang === 'hi' ? '💡 टॉर्च चालू है (अधिक रोशनी)' : '💡 Torch Active (High Brightness)')
+                          : (lang === 'hi' ? '🔦 बेहतर पहचान के लिए टॉर्च ऑन करें' : '🔦 Tap to Turn ON Torch (Bright Video)')}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
               </View>
 
-              {/* Camera Flip & Gallery Pick Floating Buttons */}
+              {/* Top-right floating buttons: torch + flip camera + gallery */}
               <View style={styles.cameraTopFloat}>
+                {/* Torch / Flashlight Toggle Button */}
+                <TouchableOpacity
+                  style={[
+                    styles.floatCircleBtn,
+                    isTorchOn && { backgroundColor: '#F59E0B', borderColor: '#FEF3C7' },
+                  ]}
+                  onPress={() => setIsTorchOn(!isTorchOn)}
+                >
+                  <Text style={{ fontSize: 16 }}>{isTorchOn ? '💡' : '🔦'}</Text>
+                </TouchableOpacity>
+
                 <TouchableOpacity
                   style={styles.floatCircleBtn}
                   onPress={() => setFacing(facing === 'back' ? 'front' : 'back')}
@@ -708,81 +825,79 @@ export default function App() {
                   <Text style={{ fontSize: 16 }}>📁</Text>
                 </TouchableOpacity>
               </View>
-            </View>
 
-            {/* Bottom Camera Controls */}
-            <View style={[styles.cameraControls, { backgroundColor: theme.cardBg, borderTopColor: theme.surfaceBorder }]}>
-              {/* Mode Selector (Photo / Video) */}
-              <View style={[styles.modeTabs, { backgroundColor: theme.cardBgAlt }]}>
-                <TouchableOpacity
-                  style={[styles.modeTab, mode === 'picture' && { backgroundColor: theme.primary }]}
-                  onPress={() => captureState === 'idle' && setMode('picture')}
-                >
-                  <Text style={[styles.modeTabText, mode === 'picture' ? { color: '#FFFFFF' } : { color: theme.textSecondary }]}>
-                    📷 {getTranslation(lang, 'modePhoto')}
-                  </Text>
-                </TouchableOpacity>
+              {/* Bottom Camera Controls */}
+              <View style={[styles.cameraControls, { backgroundColor: theme.cardBg, borderTopColor: theme.surfaceBorder }]}>
+                {/* Mode Selector (Photo / Video) */}
+                <View style={[styles.modeTabs, { backgroundColor: theme.cardBgAlt }]}>
+                  <TouchableOpacity
+                    style={[styles.modeTab, mode === 'picture' && { backgroundColor: theme.primary }]}
+                    onPress={() => captureState === 'idle' && setMode('picture')}
+                  >
+                    <Text style={[styles.modeTabText, mode === 'picture' ? { color: '#FFFFFF' } : { color: theme.textSecondary }]}>
+                      📷 {getTranslation(lang, 'modePhoto')}
+                    </Text>
+                  </TouchableOpacity>
 
-                <TouchableOpacity
-                  style={[styles.modeTab, mode === 'video' && { backgroundColor: theme.primary }]}
-                  onPress={() => captureState === 'idle' && setMode('video')}
-                >
-                  <Text style={[styles.modeTabText, mode === 'video' ? { color: '#FFFFFF' } : { color: theme.textSecondary }]}>
-                    🎥 {getTranslation(lang, 'modeVideo')}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Shutter Row */}
-              <View style={styles.shutterRow}>
-                {/* ₹5 Coin Calibration Trigger */}
-                <TouchableOpacity
-                  style={[styles.sideActionBtn, { backgroundColor: theme.cardBgAlt, borderColor: theme.surfaceBorder }]}
-                  onPress={() => setIsCalibrating(true)}
-                  disabled={captureState !== 'idle'}
-                >
-                  <Text style={{ fontSize: 20 }}>🪙</Text>
-                  <Text style={[styles.sideActionLabel, { color: theme.textSecondary }]}>
-                    {getTranslation(lang, 'calibrateBtn')}
-                  </Text>
-                </TouchableOpacity>
-
-                {/* Shutter Button */}
-                <View style={styles.shutterCenter}>
-                  {captureState === 'analyzing' || captureState === 'syncing' ? (
-                    <ActivityIndicator size="large" color={theme.primary} />
-                  ) : (
-                    <TouchableOpacity
-                      style={[
-                        styles.shutterRing,
-                        { borderColor: isDeviceSteady ? theme.primary : '#9CA3AF' },
-                        captureState === 'recording' && { borderColor: theme.gradeUrs },
-                        !isDeviceSteady && { opacity: 0.6 },
-                      ]}
-                      onPress={handleCapture}
-                      disabled={!isDeviceSteady}
-                      activeOpacity={0.8}
-                    >
-                      <View
-                        style={[
-                          styles.shutterCore,
-                          { backgroundColor: mode === 'video' ? theme.gradeUrs : theme.primary },
-                          captureState === 'recording' && styles.shutterRecordingCore,
-                        ]}
-                      />
-                    </TouchableOpacity>
-                  )}
+                  <TouchableOpacity
+                    style={[styles.modeTab, mode === 'video' && { backgroundColor: theme.primary }]}
+                    onPress={() => captureState === 'idle' && setMode('video')}
+                  >
+                    <Text style={[styles.modeTabText, mode === 'video' ? { color: '#FFFFFF' } : { color: theme.textSecondary }]}>
+                      🎥 {getTranslation(lang, 'modeVideo')}
+                    </Text>
+                  </TouchableOpacity>
                 </View>
 
-                {/* Reset / Clear Batch Button */}
-                <TouchableOpacity
-                  style={[styles.sideActionBtn, { backgroundColor: theme.cardBgAlt, borderColor: theme.surfaceBorder }]}
-                  onPress={resetBatch}
-                  disabled={captureState !== 'idle' || (sampleIndex === 0 && reportBuffer.length === 0)}
-                >
-                  <Text style={{ fontSize: 20 }}>🔄</Text>
-                  <Text style={[styles.sideActionLabel, { color: theme.textSecondary }]}>Reset</Text>
-                </TouchableOpacity>
+                {/* Shutter Row */}
+                <View style={styles.shutterRow}>
+                  {/* ₹5 Coin Calibration Trigger */}
+                  <TouchableOpacity
+                    style={[styles.sideActionBtn, { backgroundColor: theme.cardBgAlt, borderColor: theme.surfaceBorder }]}
+                    onPress={() => setIsCalibrating(true)}
+                    disabled={captureState !== 'idle'}
+                  >
+                    <Text style={{ fontSize: 20 }}>🪙</Text>
+                    <Text style={[styles.sideActionLabel, { color: theme.textSecondary }]}>
+                      {getTranslation(lang, 'calibrateBtn')}
+                    </Text>
+                  </TouchableOpacity>
+
+                  {/* Shutter Button */}
+                  <View style={styles.shutterCenter}>
+                    {captureState === 'analyzing' || captureState === 'syncing' ? (
+                      <ActivityIndicator size="large" color={theme.primary} />
+                    ) : (
+                      <TouchableOpacity
+                        style={[
+                          styles.shutterRing,
+                          { borderColor: isDeviceSteady ? theme.primary : '#F59E0B' },
+                          captureState === 'recording' && { borderColor: theme.gradeUrs },
+                        ]}
+                        onPress={handleCapture}
+                        activeOpacity={0.8}
+                      >
+                        <View
+                          style={[
+                            styles.shutterCore,
+                            { backgroundColor: mode === 'video' ? theme.gradeUrs : theme.primary },
+                            captureState === 'recording' && styles.shutterRecordingCore,
+                          ]}
+                        />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+
+                  {/* Reset / Clear Batch Button */}
+                  <TouchableOpacity
+                    style={[styles.sideActionBtn, { backgroundColor: theme.cardBgAlt, borderColor: theme.surfaceBorder }]}
+                    onPress={resetBatch}
+                    disabled={captureState !== 'idle' || (sampleIndex === 0 && reportBuffer.length === 0)}
+                  >
+                    <Text style={{ fontSize: 20 }}>🔄</Text>
+                    <Text style={[styles.sideActionLabel, { color: theme.textSecondary }]}>Reset</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             </View>
           </View>
@@ -950,7 +1065,7 @@ export default function App() {
           onClose={() => setShowSettingsModal(false)}
         />
       )}
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -1005,20 +1120,109 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
-  cameraContainer: {
+  scanRoot: {
     flex: 1,
-    backgroundColor: '#000000',
-    position: 'relative',
+    backgroundColor: '#000',
   },
   camera: {
     flex: 1,
-    width: '100%',
-    height: '100%',
   },
-  reticleOverlay: {
+  uiOverlay: {
     ...StyleSheet.absoluteFillObject,
+    justifyContent: 'space-between',
+  },
+  overlayTop: {
+    paddingTop: 8,
+    alignItems: 'center',
+  },
+  overlayCenter: {
+    flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  videoScanContainer: {
+    alignItems: 'center',
+    width: '100%',
+  },
+  videoSweepBox: {
+    width: '88%',
+    height: 180,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: 'rgba(56, 189, 248, 0.45)',
+    backgroundColor: 'rgba(0, 0, 0, 0.12)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative',
+  },
+  videoSweepBoxRecording: {
+    borderColor: 'rgba(239, 68, 68, 0.85)',
+    backgroundColor: 'rgba(239, 68, 68, 0.08)',
+  },
+  sweepGuide: {
+    alignItems: 'center',
+  },
+  recBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(220, 38, 38, 0.92)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#FECACA',
+  },
+  recDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#FFFFFF',
+    marginRight: 8,
+  },
+  recText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  sweepPromptBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.78)',
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.25)',
+  },
+  sweepPromptArrow: {
+    fontSize: 16,
+    marginRight: 6,
+  },
+  sweepPromptText: {
+    color: '#F8FAFC',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  torchHelperBanner: {
+    marginTop: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 7,
+    borderRadius: 18,
+    borderWidth: 1,
+  },
+  torchHelperBannerInactive: {
+    backgroundColor: 'rgba(30, 41, 59, 0.88)',
+    borderColor: 'rgba(245, 158, 11, 0.55)',
+  },
+  torchHelperBannerActive: {
+    backgroundColor: 'rgba(245, 158, 11, 0.92)',
+    borderColor: '#FEF3C7',
+  },
+  torchHelperText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
   },
   reticleBox: {
     width: 260,
@@ -1034,13 +1238,6 @@ const styles = StyleSheet.create({
   tr: { top: 0, right: 0, borderTopWidth: 4, borderRightWidth: 4 },
   bl: { bottom: 0, left: 0, borderBottomWidth: 4, borderLeftWidth: 4 },
   br: { bottom: 0, right: 0, borderBottomWidth: 4, borderRightWidth: 4 },
-  stabilityFloat: {
-    position: 'absolute',
-    top: 10,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-  },
   cameraTopFloat: {
     position: 'absolute',
     top: 16,

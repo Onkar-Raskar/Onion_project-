@@ -108,10 +108,19 @@ export default function SettingsModal({
               <View style={styles.presetsRow}>
                 <TouchableOpacity
                   style={[styles.presetChip, { backgroundColor: theme.primaryLight, borderColor: theme.primaryBorder }]}
-                  onPress={() => applyPreset('http://192.168.1.101:8000/analyze')}
+                  onPress={() => applyPreset('http://192.168.1.100:8000/analyze')}
                 >
                   <Text style={[styles.presetChipText, { color: theme.primary }]}>
-                    📶 192.168.1.101 (Wi-Fi)
+                    📶 192.168.1.100 (Wi-Fi)
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.presetChip, { backgroundColor: theme.cardBgAlt, borderColor: theme.surfaceBorder }]}
+                  onPress={() => applyPreset('http://192.168.1.101:8000/analyze')}
+                >
+                  <Text style={[styles.presetChipText, { color: theme.textSecondary }]}>
+                    📶 192.168.1.101
                   </Text>
                 </TouchableOpacity>
 
@@ -177,7 +186,7 @@ export default function SettingsModal({
                   {getTranslation(lang, 'languageLabel')}
                 </Text>
                 <Text style={[styles.rowSub, { color: theme.textSecondary }]}>
-                  {lang === 'en' ? 'English (Current)' : 'हिन्दी (सक्रिय)'}
+                  {lang === 'en' ? 'English (Active)' : 'हिन्दी (सक्रिय)'}
                 </Text>
               </View>
               <TouchableOpacity
@@ -185,7 +194,7 @@ export default function SettingsModal({
                 onPress={onToggleLang}
               >
                 <Text style={[styles.smallBtnText, { color: theme.primary }]}>
-                  {lang === 'en' ? 'Switch to हिन्दी' : 'Switch to EN'}
+                  {lang === 'en' ? 'Switch to Hindi' : 'अंग्रेज़ी में बदलें'}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -204,7 +213,9 @@ export default function SettingsModal({
                 onPress={onToggleTheme}
               >
                 <Text style={[styles.smallBtnText, { color: theme.text }]}>
-                  {theme.mode === 'light' ? '🌙 Dark Mode' : '☀️ Light Mode'}
+                  {theme.mode === 'light'
+                    ? (lang === 'hi' ? '🌙 डार्क मोड' : '🌙 Dark Mode')
+                    : (lang === 'hi' ? '☀️ लाइट मोड' : '☀️ Light Mode')}
                 </Text>
               </TouchableOpacity>
             </View>

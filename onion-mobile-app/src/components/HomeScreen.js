@@ -63,7 +63,7 @@ export default function HomeScreen({
               {isCheckingBackend
                 ? getTranslation(lang, 'checkingBackend')
                 : backendConnected
-                ? `${getTranslation(lang, 'backendStatusConnected')} (192.168.1.101:8000)`
+                ? `${getTranslation(lang, 'backendStatusConnected')} (${(() => { try { const u = new URL(apiUrl); return u.hostname + ':' + u.port; } catch(e) { return apiUrl; } })()})`
                 : getTranslation(lang, 'backendStatusOffline')}
             </Text>
           </View>
@@ -196,6 +196,7 @@ export default function HomeScreen({
               {getTranslation(lang, 'toolCalibrationSub')}
             </Text>
           </View>
+          <Text style={[styles.toolChevron, { color: theme.textMuted }]}>›</Text>
         </TouchableOpacity>
 
         {/* Rules Engine Simulator */}
@@ -215,6 +216,7 @@ export default function HomeScreen({
               {getTranslation(lang, 'toolSimulatorSub')}
             </Text>
           </View>
+          <Text style={[styles.toolChevron, { color: theme.textMuted }]}>›</Text>
         </TouchableOpacity>
 
         {/* View Active Certificate */}
@@ -239,6 +241,7 @@ export default function HomeScreen({
               {hasReport ? getTranslation(lang, 'toolHistorySub') : getTranslation(lang, 'noReportYet')}
             </Text>
           </View>
+          <Text style={[styles.toolChevron, { color: theme.textMuted }]}>›</Text>
         </TouchableOpacity>
 
         {/* Offline Queue */}
@@ -258,6 +261,7 @@ export default function HomeScreen({
               {getTranslation(lang, 'toolQueueSub')}
             </Text>
           </View>
+          <Text style={[styles.toolChevron, { color: theme.textMuted }]}>›</Text>
         </TouchableOpacity>
 
         {/* Settings */}
@@ -274,9 +278,10 @@ export default function HomeScreen({
               {getTranslation(lang, 'settingsTitle')}
             </Text>
             <Text style={[styles.toolDesc, { color: theme.textSecondary }]}>
-              {lang === 'hi' ? 'सर्वर IP, भाषा (हिन्दी/EN), थीम' : 'Backend IP, Language, Dark Mode'}
+              {lang === 'hi' ? 'सर्वर IP, भाषा प्राथमिकता, थीम' : 'Backend IP, Language, Dark Mode'}
             </Text>
           </View>
+          <Text style={[styles.toolChevron, { color: theme.textMuted }]}>›</Text>
         </TouchableOpacity>
       </View>
     </ScrollView>
@@ -481,5 +486,10 @@ const styles = StyleSheet.create({
   toolDesc: {
     fontSize: 11,
     marginTop: 2,
+  },
+  toolChevron: {
+    fontSize: 20,
+    fontWeight: '300',
+    marginLeft: 8,
   },
 });

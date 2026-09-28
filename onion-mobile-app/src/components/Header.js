@@ -16,7 +16,7 @@ export default function Header({
     <View style={[styles.container, { backgroundColor: theme.headerBg, borderBottomColor: theme.surfaceBorder }]}>
       <View style={styles.leftRow}>
         <View style={[styles.avatarBadge, { backgroundColor: theme.primaryLight, borderColor: theme.primaryBorder }]}>
-          <Text style={[styles.avatarIcon, { color: theme.primary }]}>🧅</Text>
+          <Text style={styles.avatarIcon}>🧅</Text>
         </View>
         <View style={styles.titleCol}>
           <View style={styles.titleRow}>
@@ -43,14 +43,25 @@ export default function Header({
           </TouchableOpacity>
         )}
 
-        {/* Language Switch Button */}
+        {/* Language Switch Button — Shows '🌐 EN' in English mode, '🌐 हिन्दी' in Hindi mode */}
         <TouchableOpacity
-          style={[styles.actionBtn, { backgroundColor: theme.cardBgAlt, borderColor: theme.surfaceBorder }]}
+          style={[
+            styles.langBtn,
+            {
+              backgroundColor: lang === 'hi' ? theme.primaryLight : theme.cardBgAlt,
+              borderColor: lang === 'hi' ? theme.primaryBorder : theme.surfaceBorder,
+            },
+          ]}
           onPress={onToggleLang}
-          activeOpacity={0.7}
+          activeOpacity={0.75}
         >
-          <Text style={[styles.actionBtnText, { color: theme.primary }]}>
-            {lang === 'en' ? 'हिन्दी' : 'EN'}
+          <Text
+            style={[
+              styles.langBtnText,
+              { color: lang === 'hi' ? theme.primary : theme.text },
+            ]}
+          >
+            {lang === 'en' ? '🌐 EN' : '🌐 हिन्दी'}
           </Text>
         </TouchableOpacity>
 
@@ -161,6 +172,19 @@ const styles = StyleSheet.create({
   actionBtnText: {
     fontSize: 12,
     fontWeight: '700',
+  },
+  langBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 14,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  langBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.3,
   },
   iconBtn: {
     width: 34,

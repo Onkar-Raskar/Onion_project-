@@ -10,21 +10,37 @@ export const aggregateReports = (reports) => {
   let ursCount = 0;
   let allDefects = [];
 
-  reports.forEach(r => {
-    if (!r || !r.batch_metrics) return;
-    const t = Number(r.batch_metrics.total_unique_onions) || 0;
+  reports.forEach((r) => {
+    if (!r) return;
+    // Support both nested (r.batch_metrics) and flat (r.grade_a_pct, r.total) response formats
+    const m = r.batch_metrics || r;
+    const t = Number(m.total_unique_onions ?? m.total ?? m.total_onions ?? 0);
+    if (t <= 0) return;
+
     total += t;
-    aCount += Math.round(((Number(r.batch_metrics.grade_a_pct) || 0) / 100) * t);
-    cCount += Math.round(((Number(r.batch_metrics.grade_c_pct) || 0) / 100) * t);
-    ursCount += Math.round(((Number(r.batch_metrics.urs_pct) || 0) / 100) * t);
-    
-    if (Array.isArray(r.defect_breakdown)) {
-      allDefects = allDefects.concat(r.defect_breakdown);
+    const aPct = parseFloat(m.grade_a_pct ?? 0);
+    const cPct = parseFloat(m.grade_c_pct ?? 0);
+    const ursPct = parseFloat(m.urs_pct ?? 0);
+
+    aCount += Math.round((aPct / 100) * t);
+    cCount += Math.round((cPct / 100) * t);
+    ursCount += Math.round((ursPct / 100) * t);
+
+    // Support both array of defect objects and dictionary of defect counts
+    const rawDefects = r.defect_breakdown || m.defect_breakdown || r.defects || m.defects;
+    if (Array.isArray(rawDefects)) {
+      allDefects = allDefects.concat(rawDefects);
+    } else if (rawDefects && typeof rawDefects === 'object') {
+      Object.entries(rawDefects).forEach(([fault, count]) => {
+        for (let i = 0; i < Number(count); i++) {
+          allDefects.push({ fault, severity_pct: 100.0 });
+        }
+      });
     }
   });
 
   const defectMap = {};
-  allDefects.forEach(d => {
+  allDefects.forEach((d) => {
     if (!d || !d.fault) return;
     if (!defectMap[d.fault]) {
       defectMap[d.fault] = { count: 0, severitySum: 0 };
@@ -33,23 +49,23 @@ export const aggregateReports = (reports) => {
     defectMap[d.fault].severitySum += parseFloat(d.severity_pct || 0);
   });
 
-  const finalDefects = Object.keys(defectMap).map(key => ({
+  const finalDefects = Object.keys(defectMap).map((key) => ({
     fault: key,
-    severity_pct: Number((defectMap[key].severitySum / defectMap[key].count).toFixed(1))
+    severity_pct: Number((defectMap[key].severitySum / defectMap[key].count).toFixed(1)),
   }));
 
-  const p_a = total > 0 ? (aCount / total) : 0;
-  const margin = total > 0 ? (1.96 * Math.sqrt((p_a * (1 - p_a)) / total) * 100).toFixed(2) : "0.00";
+  const p_a = total > 0 ? aCount / total : 0;
+  const margin = total > 0 ? (1.96 * Math.sqrt((p_a * (1 - p_a)) / total) * 100).toFixed(2) : '0.00';
 
   return {
     batch_metrics: {
       total_unique_onions: total,
-      grade_a_pct: total > 0 ? ((aCount / total) * 100).toFixed(1) : "0.0",
-      grade_c_pct: total > 0 ? ((cCount / total) * 100).toFixed(1) : "0.0",
-      urs_pct: total > 0 ? ((ursCount / total) * 100).toFixed(1) : "0.0",
-      confidence_interval_95: `±${margin}%`
+      grade_a_pct: total > 0 ? ((aCount / total) * 100).toFixed(1) : '0.0',
+      grade_c_pct: total > 0 ? ((cCount / total) * 100).toFixed(1) : '0.0',
+      urs_pct: total > 0 ? ((ursCount / total) * 100).toFixed(1) : '0.0',
+      confidence_interval_95: `±${margin}%`,
     },
-    defect_breakdown: finalDefects
+    defect_breakdown: finalDefects,
   };
 };
 
