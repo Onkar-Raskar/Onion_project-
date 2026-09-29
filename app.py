@@ -24,14 +24,12 @@ def calculate_confidence_interval(p: float, n: int, z: float = 1.96) -> float:
     margin = z * math.sqrt((p * (1 - p)) / n)
     return round(margin * 100, 2)
 
-def generate_json_report(results, final_crops, dimensions, ppm, min_premium_mm=65.0):
+def generate_json_report(results, final_crops, dimensions, ppm, min_premium_mm=65.0, boxes=None):
     total_onions = len(results)
     
-    # GATE 1: No circular objects found at all
     if total_onions == 0:
         return {"gate_failed": True, "reason": "No circular objects resembling onions found."}
 
-    # GATE 2: Too few objects. A real mandi heap will have dozens of onions.
     if total_onions < 4:
         return {"gate_failed": True, "reason": f"Only {total_onions} object(s) detected. Please frame a larger section of the onion heap."}
 
@@ -39,23 +37,26 @@ def generate_json_report(results, final_crops, dimensions, ppm, min_premium_mm=6
     grade_c_count = 0
     urs_count = 0
     detailed_defects = []
+    detections = []
 
     for i, result in enumerate(results):
         crop = final_crops[i]
         w, h = dimensions[i]
+        box = boxes[i] if boxes and i < len(boxes) else None
         
         if result.probs is None:
             urs_count += 1
+            if box: detections.append({"box": box, "class": "unrecognized", "defect": "None"})
             continue
 
         top1 = result.probs.top1
         conf = float(result.probs.top1conf)
         class_name = str(result.names[top1]).lower().strip()
         
-        # If YOLO is under 65% confident, flag it as a foreign object
         if conf < 0.65:
             urs_count += 1
             detailed_defects.append({"fault": "Unrecognized/Foreign Object", "severity_pct": 100.0})
+            if box: detections.append({"box": box, "class": "unrecognized", "defect": "Unrecognized/Foreign Object"})
             continue
         
         if class_name == "healthy":
@@ -64,8 +65,11 @@ def generate_json_report(results, final_crops, dimensions, ppm, min_premium_mm=6
             
             if diameter_mm >= min_premium_mm:
                 grade_a_count += 1
+                tier = "Grade A"
             else:
                 grade_c_count += 1 
+                tier = "Grade C"
+            if box: detections.append({"box": box, "class": "healthy", "tier": tier, "defect": "None"})
         else:
             urs_count += 1
             try:
@@ -74,9 +78,8 @@ def generate_json_report(results, final_crops, dimensions, ppm, min_premium_mm=6
                 fault_data = {"fault": class_name, "severity_pct": 100.0}
             
             detailed_defects.append(fault_data)
+            if box: detections.append({"box": box, "class": "damaged", "defect": fault_data["fault"]})
 
-    # GATE 3: THE STRICT NON-ONION GATE
-    # If 80% or more of the detected objects are garbage/unrecognized/severe defects, block the whole scan.
     if (urs_count / total_onions) >= 0.80:
         return {"gate_failed": True, "reason": "Scan rejected. The AI detected too many non-onion shapes or an overwhelming amount of spoilage. Please rescan a valid heap."}
 
@@ -93,9 +96,10 @@ def generate_json_report(results, final_crops, dimensions, ppm, min_premium_mm=6
             "grade_a_pct": grade_a_pct,
             "grade_c_pct": grade_c_pct,
             "urs_pct": urs_pct,
-            "confidence_interval_95": f"±{margin_error}%"
+            "confidence_interval_95": f"+/-{margin_error}%"
         },
-        "defect_breakdown": detailed_defects
+        "defect_breakdown": detailed_defects,
+        "detections": detections
     }
 
 @app.post("/analyze")
@@ -141,9 +145,10 @@ async def analyze_batch(file: UploadFile = File(...), ppm: float = Form(2.4)):
             else:
                 crops = [data[0] for data in extracted_data]
                 dimensions = [(data[3], data[4]) for data in extracted_data]
+                boxes = [(data[1], data[2], data[3], data[4]) for data in extracted_data]
                 
                 results = model.predict(crops, verbose=False)
-                report = generate_json_report(results, crops, dimensions, ppm)
+                report = generate_json_report(results, crops, dimensions, ppm, boxes=boxes)
 
     finally:
         if os.path.exists(temp_file_path):
@@ -194,9 +199,10 @@ async def simulate_grading(file: UploadFile = File(...), ppm: float = Form(2.4),
             else:
                 crops = [data[0] for data in extracted_data]
                 dimensions = [(data[3], data[4]) for data in extracted_data]
+                boxes = [(data[1], data[2], data[3], data[4]) for data in extracted_data]
                 
                 results = model.predict(crops, verbose=False)
-                report = generate_json_report(results, crops, dimensions, ppm, min_premium_mm=min_premium_mm)
+                report = generate_json_report(results, crops, dimensions, ppm, min_premium_mm=min_premium_mm, boxes=boxes)
 
     finally:
         if os.path.exists(temp_file_path):
