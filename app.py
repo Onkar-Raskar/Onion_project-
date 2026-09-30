@@ -2,9 +2,11 @@ import os
 import math
 import shutil
 
-# Low-memory environment settings for 512MB limit (Render Free Tier)
+import cv2
+import numpy as np
+
+# Low-memory environment settings for Render Free Tier (512MB limit)
 os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
-os.environ["YOLO_VERBOSE"] = "False"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
@@ -12,28 +14,8 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
-import torch
-from ultralytics import YOLO
 
-# Single-thread and no-grad to prevent multi-core RAM spikes on containers
-torch.set_num_threads(1)
-torch.set_grad_enabled(False)
-
-# Fix for PyTorch 2.6+ default weights_only=True breaking Ultralytics model loading
-try:
-    from ultralytics.nn.tasks import ClassificationModel, DetectionModel, SegmentationModel
-    if hasattr(torch.serialization, 'add_safe_globals'):
-        torch.serialization.add_safe_globals([ClassificationModel, DetectionModel, SegmentationModel])
-except Exception:
-    pass
-
-_orig_torch_load = torch.load
-def _safe_torch_load(*args, **kwargs):
-    kwargs["weights_only"] = False
-    return _orig_torch_load(*args, **kwargs)
-torch.load = _safe_torch_load
-
-# Import your existing pipeline modules
+# Import existing pipeline modules
 from heap_localizer import extract_onion_crops
 from size_estimator import estimate_size_tier
 from heuristics import diagnose_damage
@@ -49,15 +31,74 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Use ONNX if available for drastically reduced RAM footprint (~50MB vs ~400MB)
-MODEL_PATH = "best.onnx" if os.path.exists("best.onnx") else "best.pt"
+class OnnxClassifier:
+    """
+    Ultra-lightweight ONNX classifier (~40MB RAM) that completely replaces 
+    heavy PyTorch and Ultralytics dependencies on 512MB RAM cloud containers.
+    """
+    def __init__(self, model_path="best.onnx"):
+        import onnxruntime as ort
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 1
+        opts.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(model_path, sess_options=opts, providers=["CPUExecutionProvider"])
+        self.input_name = self.session.get_inputs()[0].name
+        self.names = {0: 'damaged', 1: 'healthy'}
+
+    def predict(self, crops, verbose=False):
+        results = []
+        for crop in crops:
+            if crop is None or getattr(crop, 'size', 0) == 0:
+                results.append(type('Result', (), {'probs': None, 'names': self.names})())
+                continue
+            
+            # Preprocess: resize to 224x224 RGB float32 in [0, 1]
+            img = cv2.resize(crop, (224, 224))
+            if len(img.shape) == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            elif img.shape[2] == 4:
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+            else:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            
+            tensor = img.transpose(2, 0, 1).astype(np.float32) / 255.0
+            batch = np.expand_dims(tensor, axis=0)
+            logits = self.session.run(None, {self.input_name: batch})[0]
+            
+            # Numerically stable softmax
+            exp = np.exp(logits[0] - np.max(logits[0]))
+            probs_arr = exp / np.sum(exp)
+            top1 = int(np.argmax(probs_arr))
+            top1conf = float(probs_arr[top1])
+            
+            class Probs:
+                def __init__(self, top1, top1conf):
+                    self.top1 = top1
+                    self.top1conf = top1conf
+
+            class Result:
+                def __init__(self, probs, names):
+                    self.probs = probs
+                    self.names = names
+
+            results.append(Result(Probs(top1, top1conf), self.names))
+        return results
+
 _model = None
 
 def get_model():
     global _model
     if _model is None:
-        print(f"Loading YOLO model into memory from {MODEL_PATH}...")
-        _model = YOLO(MODEL_PATH)
+        if os.path.exists("best.onnx"):
+            print("Loading ultra-lightweight ONNX model (uses only ~45MB RAM)...")
+            _model = OnnxClassifier("best.onnx")
+        else:
+            print("best.onnx not found, falling back to PyTorch YOLO...")
+            import torch
+            from ultralytics import YOLO
+            _orig_torch_load = torch.load
+            torch.load = lambda *args, **kwargs: _orig_torch_load(*args, **{**kwargs, "weights_only": False})
+            _model = YOLO("best.pt")
     return _model
 
 @app.get("/")

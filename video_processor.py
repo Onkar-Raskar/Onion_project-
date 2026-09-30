@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import math
-from ultralytics import YOLO
 
 from heap_localizer import extract_onion_crops
 from size_estimator import estimate_size_tier
@@ -873,6 +872,7 @@ def process_video_lot_with_tracking(
         f"{len(final_crops)} unique onions..."
     )
 
+    from ultralytics import YOLO
     model = YOLO(
         weights_path
     )

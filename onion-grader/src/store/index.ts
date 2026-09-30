@@ -64,6 +64,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   theme: 'light',
   setTheme: (theme) => set({ theme }),
 
-  backendUrl: 'http://192.168.29.41:8000',
+  backendUrl: 'https://pojeesahil--onion-grader-api-fastapi-app.modal.run',
   setBackendUrl: (url) => set({ backendUrl: url }),
 }));
