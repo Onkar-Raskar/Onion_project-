@@ -2,9 +2,25 @@ import os
 import math
 import shutil
 from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+import torch
 from ultralytics import YOLO
+
+# Fix for PyTorch 2.6+ default weights_only=True breaking Ultralytics model loading
+try:
+    from ultralytics.nn.tasks import ClassificationModel, DetectionModel, SegmentationModel
+    if hasattr(torch.serialization, 'add_safe_globals'):
+        torch.serialization.add_safe_globals([ClassificationModel, DetectionModel, SegmentationModel])
+except Exception:
+    pass
+
+_orig_torch_load = torch.load
+def _safe_torch_load(*args, **kwargs):
+    kwargs["weights_only"] = False
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _safe_torch_load
 
 # Import your existing pipeline modules
 from heap_localizer import extract_onion_crops
@@ -13,6 +29,14 @@ from heuristics import diagnose_damage
 from video_processor import extract_sharp_keyframes, RobustOnionTracker
 
 app = FastAPI(title="SIH Onion Procurement API", version="1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Load model globally to keep the API fast
 MODEL_PATH = "best.pt"

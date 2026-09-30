@@ -64,6 +64,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   theme: 'light',
   setTheme: (theme) => set({ theme }),
 
-  backendUrl: 'http://10.19.206.69:8000',
+  backendUrl: 'http://192.168.29.41:8000',
   setBackendUrl: (url) => set({ backendUrl: url }),
 }));
