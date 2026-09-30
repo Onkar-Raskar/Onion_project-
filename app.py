@@ -1,12 +1,23 @@
 import os
 import math
 import shutil
+
+# Low-memory environment settings for 512MB limit (Render Free Tier)
+os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
+os.environ["YOLO_VERBOSE"] = "False"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 import torch
 from ultralytics import YOLO
+
+# Single-thread and no-grad to prevent multi-core RAM spikes on containers
+torch.set_num_threads(1)
+torch.set_grad_enabled(False)
 
 # Fix for PyTorch 2.6+ default weights_only=True breaking Ultralytics model loading
 try:
@@ -38,10 +49,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load model globally to keep the API fast
-MODEL_PATH = "best.pt"
-print("Loading YOLOv8 Model into memory...")
-model = YOLO(MODEL_PATH)
+# Use ONNX if available for drastically reduced RAM footprint (~50MB vs ~400MB)
+MODEL_PATH = "best.onnx" if os.path.exists("best.onnx") else "best.pt"
+_model = None
+
+def get_model():
+    global _model
+    if _model is None:
+        print(f"Loading YOLO model into memory from {MODEL_PATH}...")
+        _model = YOLO(MODEL_PATH)
+    return _model
+
+@app.get("/")
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "message": "Onion Grader Backend is running"}
 
 def calculate_confidence_interval(p: float, n: int, z: float = 1.96) -> float:
     if n == 0: return 0.0
@@ -158,7 +180,7 @@ async def analyze_batch(file: UploadFile = File(...), ppm: float = Form(2.4)):
             if not final_crops:
                 report = {"gate_failed": True, "reason": "No objects resembling onions found in the video. Please scan a valid heap."}
             else:
-                results = model.predict(final_crops, verbose=False)
+                results = get_model().predict(final_crops, verbose=False)
                 report = generate_json_report(results, final_crops, dimensions, ppm)
             
         else:
@@ -171,7 +193,7 @@ async def analyze_batch(file: UploadFile = File(...), ppm: float = Form(2.4)):
                 dimensions = [(data[3], data[4]) for data in extracted_data]
                 boxes = [(data[1], data[2], data[3], data[4]) for data in extracted_data]
                 
-                results = model.predict(crops, verbose=False)
+                results = get_model().predict(crops, verbose=False)
                 report = generate_json_report(results, crops, dimensions, ppm, boxes=boxes)
 
     finally:
@@ -212,7 +234,7 @@ async def simulate_grading(file: UploadFile = File(...), ppm: float = Form(2.4),
             if not final_crops:
                 report = {"gate_failed": True, "reason": "No objects resembling onions found in the video. Please scan a valid heap."}
             else:
-                results = model.predict(final_crops, verbose=False)
+                results = get_model().predict(final_crops, verbose=False)
                 report = generate_json_report(results, final_crops, dimensions, ppm, min_premium_mm=min_premium_mm)
             
         else:
@@ -225,7 +247,7 @@ async def simulate_grading(file: UploadFile = File(...), ppm: float = Form(2.4),
                 dimensions = [(data[3], data[4]) for data in extracted_data]
                 boxes = [(data[1], data[2], data[3], data[4]) for data in extracted_data]
                 
-                results = model.predict(crops, verbose=False)
+                results = get_model().predict(crops, verbose=False)
                 report = generate_json_report(results, crops, dimensions, ppm, min_premium_mm=min_premium_mm, boxes=boxes)
 
     finally:
